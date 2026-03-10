@@ -1,0 +1,40 @@
+/* Import Tailwind CSS base styles and utilities */
+@import 'tailwindcss';
+
+/* Add Iconify plugin for icon support in Tailwind */
+@plugin '@iconify/tailwind4';
+
+/* Add Tailwind CSS Forms plugin for better form element styling */
+@plugin '@tailwindcss/forms';
+
+/* Add Tailwind CSS Typography plugin for rich text formatting */
+@plugin '@tailwindcss/typography';
+
+/* Import custom settings and variable overrides */
+@import './settings.css';
+
+/* Import main elements and layouts styles */
+@import './elements/elements.css';
+
+/* Import all custom component styles */
+@import './components/headings.css';
+@import './components/links.css';
+@import './components/buttons.css';
+@import './components/flash-messages.css';
+@import './components/callouts.css';
+@import './components/cards.css';
+@import './components/forms.css';
+@import './components/breadcrumbs.css';
+@import './components/modals.css';
+@import './components/pagination.css';
+@import './components/tables.css';
+@import './components/tabs.css';
+@import './components/tags.css';
+@import './components/dropdown.css';
+@import './components/shooting-projects.css';
+@import './components/layout.css';
+@import './components/header.css';
+@import './components/sidebar.css';
+@import './components/footer.css';
+@import './components/pdf-editor.css';
+@import './pages/order-settings.css';

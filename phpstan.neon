@@ -1,0 +1,10 @@
+includes:
+    - ./vendor/larastan/larastan/extension.neon
+parameters:
+    level: 8
+    paths:
+        - app
+    ignoreErrors:
+        - identifier: missingType.generics
+        - '#PHPDoc tag @SuppressWarnings has invalid value#'
+    treatPhpDocTypesAsCertain: false

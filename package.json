@@ -1,0 +1,43 @@
+{
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "build": "vite build",
+        "prepare": "husky install",
+        "lint": "echo 'Run make check-code for PHP linting'",
+        "lint:fix": "echo 'Run make fix-code-standard for PHP linting fixes'"
+    },
+    "dependencies": {
+        "fabric": "^5.3.0",
+        "pdf-lib": "^1.17.1",
+        "pdfjs-dist": "^3.11.174",
+        "qrcode": "^1.5.3"
+    },
+    "devDependencies": {
+        "@iconify/json": "^2.2.387",
+        "@iconify/tailwind4": "^1.0.6",
+        "@tailwindcss/forms": "^0.5.2",
+        "@tailwindcss/typography": "^0.5.19",
+        "@tailwindcss/vite": "^4.1.13",
+        "alpinejs": "^3.13.0",
+        "autoprefixer": "^10.4.2",
+        "axios": "^1.1.2",
+        "husky": "^8.0.3",
+        "laravel-vite-plugin": "^1.0.0",
+        "lint-staged": "^15.0.0",
+        "postcss": "^8.4.6",
+        "sass": "^1.89.2",
+        "tailwindcss": "^4.0.0",
+        "vite": "^5.0.0"
+    },
+    "lint-staged": {
+        "*.php": [
+            "make check-codesniffer",
+            "make check-phpstan"
+        ],
+        "*.{js,css,vue}": [
+            "echo 'Frontend files changed - consider running npm run lint'"
+        ]
+    }
+}
