@@ -87,4 +87,65 @@ class OcrController extends Controller
             ], Response::HTTP_INTERNAL_SERVER_ERROR);
         }
     }
+
+    /**
+     * Detect with multiple configured detection types.
+     *
+     * @param \App\Http\Requests\Common\ProcessOcrRequest $request
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function detectMultiple(ProcessOcrRequest $request): JsonResponse
+    {
+        try {
+            $files = $request->file('files', []);
+            if (!is_array($files)) {
+                $files = $files ? [$files] : [];
+            }
+
+            if (empty($files)) {
+                return response()->json([
+                    'message' => 'No files uploaded',
+                    'data' => null,
+                ], Response::HTTP_BAD_REQUEST);
+            }
+
+            foreach ($files as $file) {
+                if (!$file->isValid()) {
+                    return response()->json([
+                        'message' => 'Invalid file uploaded',
+                        'data' => null,
+                    ], Response::HTTP_BAD_REQUEST);
+                }
+            }
+
+            $results = [];
+
+            foreach ($files as $file) {
+                $detection = $this->ocrService->detectWithMultipleTypes($file);
+                $results[] = [
+                    'filename' => $file->getClientOriginalName(),
+                    'detection' => $detection,
+                ];
+            }
+
+            return response()->json([
+                'data' => [
+                    'files' => $results,
+                ],
+            ], Response::HTTP_OK);
+        } catch (\Throwable $exception) {
+            Log::error('Error processing OCR with multiple types.', [
+                'error' => $exception->getMessage(),
+                'trace' => $exception->getTraceAsString(),
+                'file_count' => isset($files) ? count($files) : 0,
+                'file_names' => isset($files) ? array_map(fn ($file) => $file->getClientOriginalName(), $files) : [],
+            ]);
+
+            return response()->json([
+                'message' => 'Failed to process: ' . $exception->getMessage(),
+                'data' => null,
+            ], Response::HTTP_INTERNAL_SERVER_ERROR);
+        }
+    }
 }

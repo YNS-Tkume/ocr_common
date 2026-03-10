@@ -49,6 +49,41 @@ class GoogleOcrService
     protected string $defaultLanguage;
 
     /**
+     * Detection type for Vision API (single, for backward compatibility).
+     *
+     * @var int $detectionType
+     */
+    protected int $detectionType;
+
+    /**
+     * Detection types for Vision API (multiple).
+     *
+     * @var array<int, int>
+     */
+    protected array $detectionTypes;
+
+    /**
+     * Valid detection types (all Vision API feature types).
+     *
+     * @var array<string, int>
+     */
+    private const VALID_DETECTION_TYPES = [
+        'TYPE_UNSPECIFIED' => Type::TYPE_UNSPECIFIED,
+        'FACE_DETECTION' => Type::FACE_DETECTION,
+        'LANDMARK_DETECTION' => Type::LANDMARK_DETECTION,
+        'LOGO_DETECTION' => Type::LOGO_DETECTION,
+        'LABEL_DETECTION' => Type::LABEL_DETECTION,
+        'TEXT_DETECTION' => Type::TEXT_DETECTION,
+        'DOCUMENT_TEXT_DETECTION' => Type::DOCUMENT_TEXT_DETECTION,
+        'SAFE_SEARCH_DETECTION' => Type::SAFE_SEARCH_DETECTION,
+        'IMAGE_PROPERTIES' => Type::IMAGE_PROPERTIES,
+        'CROP_HINTS' => Type::CROP_HINTS,
+        'WEB_DETECTION' => Type::WEB_DETECTION,
+        'PRODUCT_SEARCH' => Type::PRODUCT_SEARCH,
+        'OBJECT_LOCALIZATION' => Type::OBJECT_LOCALIZATION,
+    ];
+
+    /**
      * Constructor initializing GoogleOcrService.
      */
     public function __construct()
@@ -56,6 +91,8 @@ class GoogleOcrService
         $this->channel = (string) config('google.log_channel', 'google_ocr');
         $this->maxFileSize = (int) config('google.max_file_size', 20 * 1024 * 1024);
         $this->defaultLanguage = (string) config('google.default_language', 'ja');
+        $this->detectionTypes = $this->resolveDetectionTypes(config('google.detection_types', ['DOCUMENT_TEXT_DETECTION']));
+        $this->detectionType = $this->detectionTypes[0] ?? Type::DOCUMENT_TEXT_DETECTION;
 
         try {
             $credentialsPath = config('google.credentials_path');
@@ -109,7 +146,7 @@ class GoogleOcrService
             }
 
             $image = (new Image())->setContent($fileData);
-            $feature = (new Feature())->setType(Type::DOCUMENT_TEXT_DETECTION);
+            $feature = (new Feature())->setType($this->detectionType);
 
             $annotateRequest = (new AnnotateImageRequest())
                 ->setImage($image)
@@ -256,6 +293,40 @@ class GoogleOcrService
         return array_filter($detectedTexts, function (array $item) use ($minConfidence) {
             return $item['confidence'] >= $minConfidence;
         });
+    }
+
+    /**
+     * Detect with multiple configured detection types.
+     * Uses GOOGLE_OCR_DETECTION_TYPE (comma or pipe separated) for detection types.
+     *
+     * @param string|\Illuminate\Http\UploadedFile|resource $file
+     * @param array<string, mixed> $options
+     *
+     * @return array<string, mixed>
+     */
+    public function detectWithMultipleTypes($file, array $options = []): array
+    {
+        if (!$this->client) {
+            return [];
+        }
+
+        try {
+            $annotateResponse = $this->annotateWithMultipleTypes($file, $options);
+
+            if ($annotateResponse === null) {
+                return [];
+            }
+
+            return $this->buildDetectionResultFromResponse($annotateResponse);
+        } catch (\Google\ApiCore\ApiException $error) {
+            $this->logError('Error detecting with multiple types', $error, $file);
+
+            return [];
+        } catch (\Exception $error) {
+            $this->logError('Error detecting with multiple types', $error, $file);
+
+            return [];
+        }
     }
 
     /**
@@ -441,7 +512,7 @@ class GoogleOcrService
         }
 
         $image = (new Image())->setContent($fileData);
-        $feature = (new Feature())->setType(Type::DOCUMENT_TEXT_DETECTION);
+        $feature = (new Feature())->setType($this->detectionType);
 
         $annotateRequest = (new AnnotateImageRequest())
             ->setImage($image)
@@ -460,6 +531,314 @@ class GoogleOcrService
         $responses = $batchResponse->getResponses();
 
         return $responses[0] ?? null;
+    }
+
+    /**
+     * Execute Vision annotation request with multiple detection types.
+     *
+     * @param string|\Illuminate\Http\UploadedFile|resource $file
+     * @param array<string, mixed> $options
+     *
+     * @return \Google\Cloud\Vision\V1\AnnotateImageResponse|null
+     */
+    protected function annotateWithMultipleTypes($file, array $options = [])
+    {
+        if (!$this->client instanceof ImageAnnotatorClient) {
+            return null;
+        }
+
+        $fileData = $this->getFileData($file);
+
+        if ($fileData === null) {
+            return null;
+        }
+
+        if (!$this->validateFile($fileData, $file)) {
+            return null;
+        }
+
+        $features = [];
+        foreach ($this->detectionTypes as $type) {
+            $features[] = (new Feature())->setType($type);
+        }
+
+        if (empty($features)) {
+            return null;
+        }
+
+        $image = (new Image())->setContent($fileData);
+        $annotateRequest = (new AnnotateImageRequest())
+            ->setImage($image)
+            ->setFeatures($features);
+
+        if (isset($options['languageHints']) && is_array($options['languageHints'])) {
+            $imageContext = new \Google\Cloud\Vision\V1\ImageContext();
+            $imageContext->setLanguageHints($options['languageHints']);
+            $annotateRequest->setImageContext($imageContext);
+        }
+
+        $batchRequest = (new BatchAnnotateImagesRequest())
+            ->setRequests([$annotateRequest]);
+
+        $batchResponse = $this->client->batchAnnotateImages($batchRequest);
+        $responses = $batchResponse->getResponses();
+
+        return $responses[0] ?? null;
+    }
+
+    /**
+     * Build structured detection result from AnnotateImageResponse.
+     *
+     * @param \Google\Cloud\Vision\V1\AnnotateImageResponse $response
+     *
+     * @return array<string, mixed>
+     */
+    protected function buildDetectionResultFromResponse($response): array
+    {
+        $result = [];
+
+        $fullTextAnnotation = $response->getFullTextAnnotation();
+        if ($fullTextAnnotation) {
+            $result['text'] = $fullTextAnnotation->getText();
+            $result['text_detection'] = $this->buildResultsFromFullTextAnnotation($fullTextAnnotation);
+        }
+
+        $labelAnnotations = $response->getLabelAnnotations();
+        if ($labelAnnotations && count($labelAnnotations) > 0) {
+            $result['labels'] = $this->convertLabelAnnotationsToArray($labelAnnotations);
+        }
+
+        $faceAnnotations = $response->getFaceAnnotations();
+        if ($faceAnnotations && count($faceAnnotations) > 0) {
+            $result['faces'] = $this->convertFaceAnnotationsToArray($faceAnnotations);
+        }
+
+        $landmarkAnnotations = $response->getLandmarkAnnotations();
+        if ($landmarkAnnotations && count($landmarkAnnotations) > 0) {
+            $result['landmarks'] = $this->convertEntityAnnotationsToArray($landmarkAnnotations);
+        }
+
+        $logoAnnotations = $response->getLogoAnnotations();
+        if ($logoAnnotations && count($logoAnnotations) > 0) {
+            $result['logos'] = $this->convertEntityAnnotationsToArray($logoAnnotations);
+        }
+
+        $safeSearchAnnotation = $response->getSafeSearchAnnotation();
+        if ($safeSearchAnnotation) {
+            $result['safe_search'] = [
+                'adult' => $this->likelihoodToString($safeSearchAnnotation->getAdult()),
+                'spoof' => $this->likelihoodToString($safeSearchAnnotation->getSpoof()),
+                'medical' => $this->likelihoodToString($safeSearchAnnotation->getMedical()),
+                'violence' => $this->likelihoodToString($safeSearchAnnotation->getViolence()),
+                'racy' => $this->likelihoodToString($safeSearchAnnotation->getRacy()),
+            ];
+        }
+
+        $imageProperties = $response->getImagePropertiesAnnotation();
+        if ($imageProperties) {
+            $dominantColors = $imageProperties->getDominantColors();
+            if ($dominantColors) {
+                $colors = [];
+                foreach ($dominantColors->getColors() as $colorInfo) {
+                    $color = $colorInfo->getColor();
+                    if ($color) {
+                        $colors[] = [
+                            'red' => $color->getRed(),
+                            'green' => $color->getGreen(),
+                            'blue' => $color->getBlue(),
+                            'alpha' => $color->getAlpha(),
+                            'score' => $colorInfo->getScore(),
+                            'pixel_fraction' => $colorInfo->getPixelFraction(),
+                        ];
+                    }
+                }
+                $result['image_properties'] = ['dominant_colors' => $colors];
+            }
+        }
+
+        $cropHintsAnnotation = $response->getCropHintsAnnotation();
+        if ($cropHintsAnnotation) {
+            $hints = [];
+            foreach ($cropHintsAnnotation->getCropHints() as $hint) {
+                $boundingPoly = $hint->getBoundingPoly();
+                $vertices = [];
+                if ($boundingPoly) {
+                    foreach ($boundingPoly->getVertices() as $vertex) {
+                        $vertices[] = ['x' => $vertex->getX(), 'y' => $vertex->getY()];
+                    }
+                }
+                $hints[] = [
+                    'bounding_poly' => $vertices,
+                    'confidence' => $hint->getConfidence(),
+                    'importance_fraction' => $hint->getImportanceFraction(),
+                ];
+            }
+            $result['crop_hints'] = $hints;
+        }
+
+        $webDetection = $response->getWebDetection();
+        if ($webDetection) {
+            $webEntities = $webDetection->getWebEntities();
+            if ($webEntities && count($webEntities) > 0) {
+                $webResult = [];
+                foreach ($webEntities as $entity) {
+                    $webResult[] = [
+                        'entity_id' => $entity->getEntityId(),
+                        'score' => $entity->getScore(),
+                        'description' => $entity->getDescription(),
+                    ];
+                }
+                $result['web_detection'] = ['entities' => $webResult];
+            }
+        }
+
+        $localizedObjects = $response->getLocalizedObjectAnnotations();
+        if ($localizedObjects && count($localizedObjects) > 0) {
+            $result['object_localization'] = $this->convertLocalizedObjectAnnotationsToArray($localizedObjects);
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param iterable<\Google\Cloud\Vision\V1\EntityAnnotation> $annotations
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function convertLabelAnnotationsToArray(iterable $annotations): array
+    {
+        $result = [];
+        foreach ($annotations as $ann) {
+            $result[] = [
+                'description' => $ann->getDescription(),
+                'score' => $ann->getScore(),
+                'topicality' => $ann->getTopicality(),
+            ];
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param iterable<\Google\Cloud\Vision\V1\FaceAnnotation> $annotations
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function convertFaceAnnotationsToArray(iterable $annotations): array
+    {
+        $result = [];
+        foreach ($annotations as $ann) {
+            $result[] = [
+                'detection_confidence' => $ann->getDetectionConfidence(),
+                'joy_likelihood' => $this->likelihoodToString($ann->getJoyLikelihood()),
+                'sorrow_likelihood' => $this->likelihoodToString($ann->getSorrowLikelihood()),
+                'anger_likelihood' => $this->likelihoodToString($ann->getAngerLikelihood()),
+                'surprise_likelihood' => $this->likelihoodToString($ann->getSurpriseLikelihood()),
+            ];
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param iterable<\Google\Cloud\Vision\V1\EntityAnnotation> $annotations
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function convertEntityAnnotationsToArray(iterable $annotations): array
+    {
+        $result = [];
+        foreach ($annotations as $ann) {
+            $result[] = [
+                'description' => $ann->getDescription(),
+                'score' => $ann->getScore(),
+            ];
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param iterable<\Google\Cloud\Vision\V1\LocalizedObjectAnnotation> $annotations
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function convertLocalizedObjectAnnotationsToArray(iterable $annotations): array
+    {
+        $result = [];
+        foreach ($annotations as $ann) {
+            $vertices = [];
+            $boundingPoly = $ann->getBoundingPoly();
+            if ($boundingPoly) {
+                foreach ($boundingPoly->getVertices() as $vertex) {
+                    $vertices[] = ['x' => $vertex->getX(), 'y' => $vertex->getY()];
+                }
+            }
+            $result[] = [
+                'name' => $ann->getName(),
+                'score' => $ann->getScore(),
+                'bounding_poly' => $vertices,
+            ];
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param int|null $likelihood
+     *
+     * @return string
+     */
+    private function likelihoodToString($likelihood): string
+    {
+        $map = [
+            0 => 'UNKNOWN',
+            1 => 'VERY_UNLIKELY',
+            2 => 'UNLIKELY',
+            3 => 'POSSIBLE',
+            4 => 'LIKELY',
+            5 => 'VERY_LIKELY',
+        ];
+
+        return $map[(int) $likelihood] ?? 'UNKNOWN';
+    }
+
+    /**
+     * Resolve detection type from config string.
+     *
+     * @param string $type
+     *
+     * @return int
+     */
+    protected function resolveDetectionType(string $type): int
+    {
+        $normalized = strtoupper($type);
+
+        return self::VALID_DETECTION_TYPES[$normalized] ?? Type::DOCUMENT_TEXT_DETECTION;
+    }
+
+    /**
+     * Resolve detection types from config array.
+     *
+     * @param array<int, string> $types
+     *
+     * @return array<int, int>
+     */
+    protected function resolveDetectionTypes(array $types): array
+    {
+        $resolved = [];
+
+        foreach ($types as $type) {
+            if (!is_string($type) || $type === '') {
+                continue;
+            }
+            $value = $this->resolveDetectionType($type);
+            if (!in_array($value, $resolved, true)) {
+                $resolved[] = $value;
+            }
+        }
+
+        return $resolved ?: [Type::DOCUMENT_TEXT_DETECTION];
     }
 
     /**
