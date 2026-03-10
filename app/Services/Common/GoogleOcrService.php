@@ -317,7 +317,9 @@ class GoogleOcrService
                 return [];
             }
 
-            return $this->buildDetectionResultFromResponse($annotateResponse);
+            $result = $this->buildDetectionResultFromResponse($annotateResponse);
+
+            return $this->applyResultMapping($result);
         } catch (\Google\ApiCore\ApiException $error) {
             $this->logError('Error detecting with multiple types', $error, $file);
 
@@ -698,6 +700,166 @@ class GoogleOcrService
         }
 
         return $result;
+    }
+
+    /**
+     * Apply form field mapping to detection result.
+     * フォームの入力ボックス・ドロップダウンに割り当てる値を生成し、form_values に追加する。
+     *
+     * @param array<string, mixed> $result
+     *
+     * @return array<string, mixed>
+     */
+    protected function applyResultMapping(array $result): array
+    {
+        $formValues = $this->buildFormFieldValues($result);
+
+        if (!empty($formValues)) {
+            $result['form_values'] = $formValues;
+        }
+
+        return $result;
+    }
+
+    /**
+     * Build form field values from OCR result using form_field_mapping config.
+     *
+     * @param array<string, mixed> $result
+     *
+     * @return array<string, mixed>
+     */
+    protected function buildFormFieldValues(array $result): array
+    {
+        $mapping = config('google.form_field_mapping', []);
+
+        if (empty($mapping) || !is_array($mapping)) {
+            return [];
+        }
+
+        $formValues = [];
+
+        foreach ($mapping as $formFieldName => $sourceConfig) {
+            $value = $this->resolveFormFieldValue($result, $formFieldName, $sourceConfig);
+
+            if ($value !== null) {
+                $formValues[$formFieldName] = $value;
+            }
+        }
+
+        return $formValues;
+    }
+
+    /**
+     * Resolve value for a form field from OCR result.
+     *
+     * @param array<string, mixed> $result
+     * @param string $formFieldName
+     * @param mixed $sourceConfig
+     *
+     * @return mixed
+     */
+    protected function resolveFormFieldValue(array $result, string $formFieldName, $sourceConfig)
+    {
+        if (is_string($sourceConfig)) {
+            return $this->resolveDirectMapping($result, $sourceConfig);
+        }
+
+        if (is_array($sourceConfig)) {
+            if (!empty($sourceConfig['pattern']) && !empty($sourceConfig['source'])) {
+                return $this->resolvePatternExtraction($result, $sourceConfig);
+            }
+            if (!empty($sourceConfig['source']) && isset($sourceConfig['property'])) {
+                return $this->resolveArrayProperty($result, $sourceConfig);
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string, mixed> $result
+     * @param string $ocrKey
+     *
+     * @return mixed
+     */
+    protected function resolveDirectMapping(array $result, string $ocrKey)
+    {
+        $value = $result[$ocrKey] ?? null;
+
+        if (is_string($value)) {
+            return $value;
+        }
+
+        if (is_array($value)) {
+            return json_encode($value, JSON_UNESCAPED_UNICODE);
+        }
+
+        return $value;
+    }
+
+    /**
+     * @param array<string, mixed> $result
+     * @param array<string, mixed> $config
+     *
+     * @return string|null
+     */
+    protected function resolvePatternExtraction(array $result, array $config): ?string
+    {
+        $sourceText = $result[$config['source']] ?? null;
+
+        if (!is_string($sourceText)) {
+            return null;
+        }
+
+        $group = $config['group'] ?? 1;
+        $matches = [];
+
+        if (preg_match($config['pattern'], $sourceText, $matches) && isset($matches[$group])) {
+            return trim($matches[$group]);
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string, mixed> $result
+     * @param array<string, mixed> $config
+     *
+     * @return mixed
+     */
+    protected function resolveArrayProperty(array $result, array $config)
+    {
+        $source = $result[$config['source']] ?? null;
+
+        if (!is_array($source)) {
+            return null;
+        }
+
+        $property = $config['property'];
+        $index = $config['index'] ?? null;
+        $join = $config['join'] ?? null;
+
+        $values = [];
+
+        foreach ($source as $item) {
+            if (is_array($item) && isset($item[$property])) {
+                $values[] = $item[$property];
+            }
+        }
+
+        if (empty($values)) {
+            return null;
+        }
+
+        if ($index !== null) {
+            return $values[$index] ?? null;
+        }
+
+        if ($join !== null) {
+            return implode($join, $values);
+        }
+
+        return $values[0] ?? null;
     }
 
     /**

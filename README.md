@@ -65,7 +65,7 @@
 
 | ファイル | 役割 |
 |----------|------|
-| `config/google.php` | OCR用設定（認証パス、検出タイプ、ログ、ファイルサイズ、MIMEタイプ） |
+| `config/google.php` | OCR用設定（認証パス、検出タイプ、マッピング、ログ、ファイルサイズ、MIMEタイプ） |
 | `config/logging.php` | `google_ocr` ログチャンネル定義 |
 
 #### 2.3 ルーティング
@@ -142,11 +142,8 @@ ocr_common/
 'log_channel' => env('GOOGLE_LOG_CHANNEL', 'google_ocr'),
 'default_language' => env('GOOGLE_DEFAULT_LANGUAGE', 'ja'),
 'max_file_size' => (int) env('GOOGLE_OCR_MAX_FILE_SIZE', 20 * 1024 * 1024),
-'ocr_allowed_mime_types' => [
-    'application/pdf',
-    'image/jpeg', 'image/jpg', 'image/png',
-    'image/tiff', 'image/x-tiff',
-],
+'ocr_allowed_mime_types' => [...],
+'form_field_mapping' => [...],  // フォームフィールドマッピング（下記参照）
 ```
 
 ※ `detection_type` と `detection_types` は `GOOGLE_OCR_DETECTION_TYPE` の値から自動で設定されます。
@@ -188,7 +185,68 @@ GOOGLE_OCR_DETECTION_TYPE=DOCUMENT_TEXT_DETECTION|LABEL_DETECTION|SAFE_SEARCH_DE
 
 複数指定時は `detectWithMultipleTypes()` メソッドまたは `POST /api/ocr/detect-multiple` エンドポイントを使用してください。
 
+**フォームフィールドマッピング（`form_field_mapping`）:**
 
+OCRで抽出した値を、フォームの入力ボックスやドロップダウンに割り当てる設定です。`config/google.php` の `form_field_mapping` で定義し、結果の `form_values` にフォームフィールド名をキーとした値が格納されます。
+
+```php
+// config/google.php
+'form_field_mapping' => [
+    // 直接マッピング: OCR結果のキーをそのままフォームに割り当て
+    'full_text' => 'text',  // ラベル: 全文
+
+    // 正規表現で抽出してフォームに割り当て
+    'invoice_number' => ['source' => 'text', 'pattern' => '/請求番号[：:]\s*(.+)/u'],  // ラベル: 請求番号
+    'document_date' => ['source' => 'text', 'pattern' => '/日付[：:]\s*(\d{4}[-\/]\d{2}[-\/]\d{2})/u', 'group' => 1],  // ラベル: 日付
+
+    // ドロップダウン用: テキストから書類種別を抽出し、select の value に割り当て
+    'document_type' => ['source' => 'text', 'pattern' => '/(見積書|請求書|領収書)/u'],  // ラベル: 書類種別
+
+    // ドロップダウン用: ラベル検出の先頭をカテゴリ選択に割り当て
+    'category' => ['source' => 'labels', 'property' => 'description', 'index' => 0],  // ラベル: カテゴリ
+],
+```
+
+**ドロップダウンへのマッピング例:**
+
+文書に「請求書」と記載されていれば、正規表現で抽出し `form_values.document_type` に `"請求書"` が入ります。フォームの `<select>` の `value` と一致させてください。
+
+```html
+<!-- OCRで「請求書」を検出 → form_values.document_type = "請求書" が返る -->
+<select name="document_type">
+  <option value="">選択してください</option>
+  <option value="見積書">見積書</option>
+  <option value="請求書">請求書</option>
+  <option value="領収書">領収書</option>
+</select>
+```
+
+```javascript
+// form_values でドロップダウンを自動選択
+const formValues = response.data.files[0].detection.form_values;
+if (formValues.document_type) {
+  document.querySelector('select[name="document_type"]').value = formValues.document_type;
+}
+```
+
+| 形式 | 説明 |
+|------|------|
+| `'form_field' => 'ocr_key'` | OCR結果のキー（text, labels 等）をそのまま割り当て |
+| `'form_field' => ['source'=>'text','pattern'=>'/.../u']` | 正規表現でテキストから抽出。ドロップダウンは `value` と一致するパターンで抽出 |
+| `'form_field' => ['source'=>'labels','property'=>'description','index'=>0]` | ラベル検出の指定インデックスを取得（ドロップダウン用） |
+| `'form_field' => ['source'=>'labels','property'=>'description','join'=>',']` | 配列のプロパティを結合して取得 |
+
+**form_field とラベルの対応例:**
+
+| form_field | ラベル（表示名） | 用途 |
+|------------|------------------|------|
+| `full_text` | 全文 | テキストエリア |
+| `invoice_number` | 請求番号 | 入力ボックス |
+| `document_date` | 日付 | 入力ボックス |
+| `document_type` | 書類種別 | ドロップダウン（見積書/請求書/領収書） |
+| `category` | カテゴリ | ドロップダウン（ラベル検出の先頭を選択） |
+
+レスポンスの `form_values` をフォームの `name` や `id` に合わせて使用してください。
 
 
 
@@ -240,12 +298,12 @@ curl -X POST http://localhost:8000/api/ocr/detect-multiple -F "files[]=@image.jp
           "labels": [
             { "description": "ラベル名", "score": 0.95, "topicality": 0.9 }
           ],
-          "safe_search": {
-            "adult": "VERY_UNLIKELY",
-            "spoof": "VERY_UNLIKELY",
-            "medical": "VERY_UNLIKELY",
-            "violence": "VERY_UNLIKELY",
-            "racy": "VERY_UNLIKELY"
+          "safe_search": { "adult": "VERY_UNLIKELY", "spoof": "VERY_UNLIKELY", "..." },
+          "form_values": {
+            "invoice_number": "INV-001",
+            "document_date": "2024-01-15",
+            "document_type": "請求書",
+            "full_text": "抽出されたテキスト..."
           }
         }
       }
@@ -253,6 +311,7 @@ curl -X POST http://localhost:8000/api/ocr/detect-multiple -F "files[]=@image.jp
   }
 }
 ```
+※ `form_values` は `form_field_mapping` 設定時に追加されます。
 
 #### 4.2 プログラム内での利用（DI）
 
@@ -332,6 +391,8 @@ $result = $this->ocrService->detectWithMultipleTypes($file);
 ```
 
 **返却されるキー（検出タイプに応じて）:** `text`, `text_detection`, `labels`, `faces`, `landmarks`, `logos`, `safe_search`, `image_properties`, `crop_hints`, `web_detection`, `object_localization`
+
+**フォームマッピング時:** `form_values` にフォームフィールド名をキーとした値が追加されます。
 
 
 
