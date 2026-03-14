@@ -3,11 +3,14 @@
 namespace App\Services\Common;
 
 use Google\Cloud\Vision\V1\{
+    AnnotateFileRequest,
     AnnotateImageRequest,
+    BatchAnnotateFilesRequest,
     BatchAnnotateImagesRequest,
     Feature,
     Feature\Type,
     Image,
+    InputConfig,
 };
 use Google\Cloud\Vision\V1\Client\ImageAnnotatorClient;
 use Illuminate\Http\UploadedFile;
@@ -135,14 +138,32 @@ class GoogleOcrService
         }
 
         try {
-            $fileData = $this->getFileData($file);
-
-            if ($fileData === null) {
+            $payload = $this->getValidatedPayload($file);
+            if ($payload === null) {
                 return null;
             }
 
-            if (!$this->validateFile($fileData, $file)) {
-                return null;
+            $fileData = $payload['fileData'];
+            $mimeType = $payload['mimeType'];
+
+            if ($this->isPdfMimeType($mimeType)) {
+                $responses = $this->annotatePdfWithTypes($fileData, [$this->detectionType], $options);
+                if (empty($responses)) {
+                    return null;
+                }
+
+                $texts = [];
+                foreach ($responses as $response) {
+                    $fullTextAnnotation = $response->getFullTextAnnotation();
+                    if ($fullTextAnnotation) {
+                        $text = $fullTextAnnotation->getText();
+                        if (is_string($text) && trim($text) !== '') {
+                            $texts[] = $text;
+                        }
+                    }
+                }
+
+                return empty($texts) ? null : implode("\n\n", $texts);
             }
 
             $image = (new Image())->setContent($fileData);
@@ -201,7 +222,39 @@ class GoogleOcrService
         }
 
         try {
-            $annotateResponse = $this->annotateDocument($file, $options);
+            $payload = $this->getValidatedPayload($file);
+            if ($payload === null) {
+                return [];
+            }
+
+            $fileData = $payload['fileData'];
+            $mimeType = $payload['mimeType'];
+
+            if ($this->isPdfMimeType($mimeType)) {
+                $responses = $this->annotatePdfWithTypes($fileData, [$this->detectionType], $options);
+                if (empty($responses)) {
+                    return [];
+                }
+
+                $results = [];
+                foreach ($responses as $response) {
+                    $pageResults = [];
+                    $fullTextAnnotation = $response->getFullTextAnnotation();
+                    if ($fullTextAnnotation) {
+                        $pageResults = $this->buildResultsFromFullTextAnnotation($fullTextAnnotation);
+                    }
+                    if (empty($pageResults)) {
+                        $pageResults = $this->buildResultsFromTextAnnotations(
+                            $response->getTextAnnotations() ?? []
+                        );
+                    }
+                    $results = array_merge($results, $pageResults);
+                }
+
+                return $results;
+            }
+
+            $annotateResponse = $this->annotateDocumentFromData($fileData, $options);
 
             if ($annotateResponse === null) {
                 return [];
@@ -248,8 +301,34 @@ class GoogleOcrService
         }
 
         try {
-            $annotateResponse = $this->annotateDocument($file);
+            $payload = $this->getValidatedPayload($file);
+            if ($payload === null) {
+                return null;
+            }
 
+            $fileData = $payload['fileData'];
+            $mimeType = $payload['mimeType'];
+
+            if ($this->isPdfMimeType($mimeType)) {
+                $responses = $this->annotatePdfWithTypes($fileData, [$this->detectionType]);
+                if (empty($responses)) {
+                    return null;
+                }
+
+                foreach ($responses as $response) {
+                    $fullTextAnnotation = $response->getFullTextAnnotation();
+                    if ($fullTextAnnotation) {
+                        $language = $this->extractLanguageFromFullTextAnnotation($fullTextAnnotation);
+                        if ($language !== null) {
+                            return $language;
+                        }
+                    }
+                }
+
+                return $this->defaultLanguage;
+            }
+
+            $annotateResponse = $this->annotateDocumentFromData($fileData);
             if ($annotateResponse === null) {
                 return null;
             }
@@ -311,8 +390,30 @@ class GoogleOcrService
         }
 
         try {
-            $annotateResponse = $this->annotateWithMultipleTypes($file, $options);
+            $payload = $this->getValidatedPayload($file);
+            if ($payload === null) {
+                return [];
+            }
 
+            $fileData = $payload['fileData'];
+            $mimeType = $payload['mimeType'];
+
+            if ($this->isPdfMimeType($mimeType)) {
+                $responses = $this->annotatePdfWithTypes($fileData, $this->detectionTypes, $options);
+                if (empty($responses)) {
+                    return [];
+                }
+
+                $result = [];
+                foreach ($responses as $response) {
+                    $pageResult = $this->buildDetectionResultFromResponse($response);
+                    $result = $this->mergeDetectionResults($result, $pageResult);
+                }
+
+                return $this->applyResultMapping($result);
+            }
+
+            $annotateResponse = $this->annotateWithMultipleTypesFromData($fileData, $options);
             if ($annotateResponse === null) {
                 return [];
             }
@@ -513,6 +614,23 @@ class GoogleOcrService
             return null;
         }
 
+        return $this->annotateDocumentFromData($fileData, $options);
+    }
+
+    /**
+     * Execute a Vision image annotation request from file content.
+     *
+     * @param string $fileData
+     * @param array<string, mixed> $options
+     *
+     * @return \Google\Cloud\Vision\V1\AnnotateImageResponse|null
+     */
+    protected function annotateDocumentFromData(string $fileData, array $options = [])
+    {
+        if (!$this->client instanceof ImageAnnotatorClient) {
+            return null;
+        }
+
         $image = (new Image())->setContent($fileData);
         $feature = (new Feature())->setType($this->detectionType);
 
@@ -559,6 +677,23 @@ class GoogleOcrService
             return null;
         }
 
+        return $this->annotateWithMultipleTypesFromData($fileData, $options);
+    }
+
+    /**
+     * Execute Vision image annotation request with multiple detection types from file content.
+     *
+     * @param string $fileData
+     * @param array<string, mixed> $options
+     *
+     * @return \Google\Cloud\Vision\V1\AnnotateImageResponse|null
+     */
+    protected function annotateWithMultipleTypesFromData(string $fileData, array $options = [])
+    {
+        if (!$this->client instanceof ImageAnnotatorClient) {
+            return null;
+        }
+
         $features = [];
         foreach ($this->detectionTypes as $type) {
             $features[] = (new Feature())->setType($type);
@@ -586,6 +721,101 @@ class GoogleOcrService
         $responses = $batchResponse->getResponses();
 
         return $responses[0] ?? null;
+    }
+
+    /**
+     * Execute Vision file annotation request for PDF and return page responses.
+     *
+     * @param string $fileData
+     * @param array<int, int> $featureTypes
+     * @param array<string, mixed> $options
+     *
+     * @return array<int, \Google\Cloud\Vision\V1\AnnotateImageResponse>
+     */
+    protected function annotatePdfWithTypes(string $fileData, array $featureTypes, array $options = []): array
+    {
+        if (!$this->client instanceof ImageAnnotatorClient) {
+            return [];
+        }
+
+        $features = [];
+        foreach ($featureTypes as $type) {
+            $features[] = (new Feature())->setType($type);
+        }
+
+        if (empty($features)) {
+            return [];
+        }
+
+        $inputConfig = (new InputConfig())
+            ->setMimeType('application/pdf')
+            ->setContent($fileData);
+
+        $fileRequest = (new AnnotateFileRequest())
+            ->setInputConfig($inputConfig)
+            ->setFeatures($features);
+
+        if (isset($options['pages']) && is_array($options['pages'])) {
+            $fileRequest->setPages($options['pages']);
+        }
+
+        $batchRequest = (new BatchAnnotateFilesRequest())
+            ->setRequests([$fileRequest]);
+
+        $batchResponse = $this->client->batchAnnotateFiles($batchRequest);
+        $fileResponses = $batchResponse->getResponses();
+        $firstFileResponse = $fileResponses[0] ?? null;
+
+        if ($firstFileResponse === null) {
+            return [];
+        }
+
+        $pageResponses = $firstFileResponse->getResponses();
+
+        if (!is_iterable($pageResponses)) {
+            return [];
+        }
+
+        $results = [];
+        foreach ($pageResponses as $response) {
+            $results[] = $response;
+        }
+
+        return $results;
+    }
+
+    /**
+     * Get validated payload including content and MIME type.
+     *
+     * @param string|\Illuminate\Http\UploadedFile|resource $file
+     *
+     * @return array{fileData: string, mimeType: string}|null
+     */
+    protected function getValidatedPayload($file): ?array
+    {
+        $fileData = $this->getFileData($file);
+        if ($fileData === null) {
+            return null;
+        }
+
+        if (!$this->validateFile($fileData, $file)) {
+            return null;
+        }
+
+        return [
+            'fileData' => $fileData,
+            'mimeType' => $this->getMimeType($file, $fileData),
+        ];
+    }
+
+    /**
+     * @param string $mimeType
+     *
+     * @return bool
+     */
+    protected function isPdfMimeType(string $mimeType): bool
+    {
+        return $mimeType === 'application/pdf';
     }
 
     /**
@@ -719,6 +949,37 @@ class GoogleOcrService
         }
 
         return $result;
+    }
+
+    /**
+     * Merge page-level detection results into a single result.
+     *
+     * @param array<string, mixed> $base
+     * @param array<string, mixed> $incoming
+     *
+     * @return array<string, mixed>
+     */
+    protected function mergeDetectionResults(array $base, array $incoming): array
+    {
+        foreach ($incoming as $key => $value) {
+            if ($key === 'text' && is_string($value)) {
+                $existing = isset($base[$key]) && is_string($base[$key]) ? $base[$key] : '';
+                $base[$key] = $existing === '' ? $value : $existing . "\n\n" . $value;
+                continue;
+            }
+
+            if (!array_key_exists($key, $base)) {
+                $base[$key] = $value;
+                continue;
+            }
+
+            if (is_array($base[$key]) && is_array($value)) {
+                $base[$key] = array_merge($base[$key], $value);
+                continue;
+            }
+        }
+
+        return $base;
     }
 
     /**
